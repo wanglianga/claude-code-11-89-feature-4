@@ -12,6 +12,11 @@ import com.waterrepair.crew.ToolItem;
 import com.waterrepair.crew.ToolItemRepository;
 import com.waterrepair.crew.Vehicle;
 import com.waterrepair.crew.VehicleRepository;
+import com.waterrepair.compensation.CompensationSeedDtos;
+import com.waterrepair.compensation.ContractLevel;
+import com.waterrepair.compensation.ContractLevelRepository;
+import com.waterrepair.compensation.ServiceAccount;
+import com.waterrepair.compensation.ServiceAccountRepository;
 import com.waterrepair.network.AddressPoint;
 import com.waterrepair.network.AddressPointRepository;
 import com.waterrepair.network.GeoLandmark;
@@ -58,6 +63,8 @@ public class SeedService {
     private final VehicleRepository vehicleRepo;
     private final ToolItemRepository toolRepo;
     private final OperationPermitRepository permitRepo;
+    private final ContractLevelRepository contractLevelRepo;
+    private final ServiceAccountRepository serviceAccountRepo;
 
     public SeedService(ObjectMapper objectMapper, JdbcTemplate jdbcTemplate, AuthService authService,
                        UserAccountRepository userRepo, NetworkNodeRepository nodeRepo,
@@ -65,7 +72,9 @@ public class SeedService {
                        AddressPointRepository addressRepo, GeoLandmarkRepository landmarkRepo,
                        PressureDeviceRepository deviceRepo, PressureReadingRepository readingRepo,
                        CrewRepository crewRepo, VehicleRepository vehicleRepo,
-                       ToolItemRepository toolRepo, OperationPermitRepository permitRepo) {
+                       ToolItemRepository toolRepo, OperationPermitRepository permitRepo,
+                       ContractLevelRepository contractLevelRepo,
+                       ServiceAccountRepository serviceAccountRepo) {
         this.objectMapper = objectMapper;
         this.jdbcTemplate = jdbcTemplate;
         this.authService = authService;
@@ -81,6 +90,8 @@ public class SeedService {
         this.vehicleRepo = vehicleRepo;
         this.toolRepo = toolRepo;
         this.permitRepo = permitRepo;
+        this.contractLevelRepo = contractLevelRepo;
+        this.serviceAccountRepo = serviceAccountRepo;
     }
 
     @Transactional
@@ -158,6 +169,17 @@ public class SeedService {
             userRepo.save(new UserAccount(a.username(), authService.encode(a.password()),
                     a.displayName(), a.role(), a.crewCode()));
         }
+
+        CompensationSeedDtos.CompensationSeed comp = readJson(
+                "samples/compensation.json", CompensationSeedDtos.CompensationSeed.class);
+        for (CompensationSeedDtos.LevelSeed l : comp.contractLevels()) {
+            contractLevelRepo.save(new ContractLevel(l.code(), l.name(),
+                    l.creditAmountCny(), l.slaNote()));
+        }
+        for (CompensationSeedDtos.AccountSeed a : comp.serviceAccounts()) {
+            serviceAccountRepo.save(new ServiceAccount(a.accountNo(), a.customerName(),
+                    a.contractLevelCode(), a.addressCodes(), a.phone()));
+        }
     }
 
     private <T> T readJson(String path, Class<T> type) {
@@ -183,6 +205,8 @@ public class SeedService {
         m.put("vehicles", vehicleRepo.count());
         m.put("tools", toolRepo.count());
         m.put("permits", permitRepo.count());
+        m.put("contractLevels", contractLevelRepo.count());
+        m.put("serviceAccounts", serviceAccountRepo.count());
         return m;
     }
 }

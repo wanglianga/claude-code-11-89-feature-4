@@ -1,0 +1,23 @@
+{
+  "_comment": "停水服务补偿核算样例：U1-U13 分别关联 A01-A13。U7 为题面指定样例账户（尊享合同，每个抵扣 50 元）。",
+  "contractLevels": [
+    { "code": "CL-RES",  "name": "居民标准供水合同", "creditAmountCny": 20,  "slaNote": "年度累计停水超阈值后按每4小时1个服务抵扣、每日最多2个核算" },
+    { "code": "CL-PLUS", "name": "居民尊享保障合同", "creditAmountCny": 50,  "slaNote": "标准规则不变，单个服务抵扣面额更高" },
+    { "code": "CL-BIZ",  "name": "非居民重点用水合同", "creditAmountCny": 100, "slaNote": "商业客户，单个服务抵扣100元" }
+  ],
+  "serviceAccounts": [
+    { "accountNo": "U1",  "customerName": "幸福路1号 住户",   "contractLevelCode": "CL-RES",  "addressCodes": ["A01"], "phone": "13900000001" },
+    { "accountNo": "U2",  "customerName": "幸福路3号 住户",   "contractLevelCode": "CL-RES",  "addressCodes": ["A02"], "phone": "13900000002" },
+    { "accountNo": "U3",  "customerName": "幸福路4号 住户",   "contractLevelCode": "CL-RES",  "addressCodes": ["A03"], "phone": "13900000003" },
+    { "accountNo": "U4",  "customerName": "幸福里6栋1单元 住户", "contractLevelCode": "CL-PLUS", "addressCodes": ["A04"], "phone": "13900000004" },
+    { "accountNo": "U5",  "customerName": "幸福路8号 住户",   "contractLevelCode": "CL-RES",  "addressCodes": ["A05"], "phone": "13900000005" },
+    { "accountNo": "U6",  "customerName": "滨河巷1号 商户",   "contractLevelCode": "CL-BIZ",  "addressCodes": ["A06"], "phone": "13900000006" },
+    { "accountNo": "U7",  "customerName": "滨河巷3号 李女士", "contractLevelCode": "CL-PLUS", "addressCodes": ["A07"], "phone": "13900000007" },
+    { "accountNo": "U8",  "customerName": "滨河巷5号 王先生",  "contractLevelCode": "CL-RES",  "addressCodes": ["A08"], "phone": "13900000008" },
+    { "accountNo": "U9",  "customerName": "滨河巷7号 住户",   "contractLevelCode": "CL-RES",  "addressCodes": ["A09"], "phone": "13900000009" },
+    { "accountNo": "U10", "customerName": "建设路1号 住户",   "contractLevelCode": "CL-RES",  "addressCodes": ["A10"], "phone": "13900000010" },
+    { "accountNo": "U11", "customerName": "建设路3号 住户",   "contractLevelCode": "CL-RES",  "addressCodes": ["A11"], "phone": "13900000011" },
+    { "accountNo": "U12", "customerName": "建设路5号 商户",   "contractLevelCode": "CL-BIZ",  "addressCodes": ["A12"], "phone": "13900000012" },
+    { "accountNo": "U13", "customerName": "建设路7号 住户",   "contractLevelCode": "CL-RES",  "addressCodes": ["A13"], "phone": "13900000013" }
+  ]
+}

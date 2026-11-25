@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>停水补偿 · 客服争议核查页</title>
+<style>
+  :root { --blue:#1f6feb; --bg:#f5f7fa; --card:#fff; --line:#e3e8ef; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif; background:var(--bg); color:#1f2328; }
+  header { background:#0b3d91; color:#fff; padding:14px 24px; }
+  header h1 { margin:0; font-size:18px; }
+  header .sub { font-size:12px; opacity:.85; margin-top:4px; }
+  .wrap { max-width:1180px; margin:18px auto; padding:0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:16px; box-shadow:0 1px 2px rgba(16,24,40,.04); }
+  .card h2 { font-size:15px; margin:0 0 12px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  label { font-size:13px; color:#57606a; }
+  input { padding:7px 10px; border:1px solid #d0d7de; border-radius:6px; font-size:13px; }
+  button { padding:8px 16px; border:0; border-radius:6px; background:var(--blue); color:#fff; font-size:13px; cursor:pointer; }
+  button.ghost { background:#eaeef2; color:#1f2328; }
+  button:hover { filter:brightness(.96); }
+  .muted { color:#6e7781; font-size:12px; }
+  .kpi { display:flex; gap:14px; flex-wrap:wrap; }
+  .kpi .box { flex:1 1 150px; border:1px solid var(--line); border-radius:8px; padding:12px; background:#fbfdff; }
+  .kpi .v { font-size:24px; font-weight:700; margin-top:4px; }
+  .kpi .k { font-size:12px; color:#6e7781; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { border:1px solid var(--line); padding:7px 9px; text-align:left; vertical-align:top; }
+  th { background:#f0f3f6; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; background:#ddf4ff; color:#0969da; }
+  .tag.ok { background:#dafbe1; color:var(--ok); }
+  .tag.warn { background:#fff8c5; color:var(--warn); }
+  .tag.bad { background:#ffebe9; color:var(--bad); }
+  .tag.gray { background:#eaeef2; color:#57606a; }
+  pre.explain { white-space:pre-wrap; background:#0d1117; color:#e6edf3; padding:14px; border-radius:8px; font-size:12.5px; line-height:1.75; margin:0; font-family:"PingFang SC","Microsoft YaHei",monospace; }
+  .prov { background:#f6f8fa; border-left:3px solid var(--blue); padding:6px 10px; margin:6px 0; border-radius:0 6px 6px 0; font-size:12px; }
+  .delta-pos { color:var(--ok); font-weight:700; }
+  .delta-neg { color:var(--bad); font-weight:700; }
+  .err { background:#ffebe9; border:1px solid #ffabaf; color:#82071e; padding:10px 12px; border-radius:8px; font-size:13px; white-space:pre-wrap; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width: 900px){ .grid2 { grid-template-columns:1fr; } }
+  a { color:var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <h1>停水服务补偿 · 客服争议核查页</h1>
+  <div class="sub">从服务抵扣反查：服务账户 → 受水地址 → 账户日并集时间片 → 抢修单 → 停水/恢复回执来源 ｜ 同一账户同一自然日先并集，每满 4 小时 1 个抵扣，每日最多 2 个</div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <div class="row">
+      <label>调度员账号</label><input id="username" value="dispatcher" style="width:130px" />
+      <label>密码</label><input id="password" value="Disp@12345" type="password" style="width:130px" />
+      <button class="ghost" onclick="login()">登录换 token</button>
+      <label>Token</label><input id="token" placeholder="Bearer token（登录后自动填入）" style="width:300px" />
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label>服务账户</label><input id="accountNo" value="U7" style="width:110px" />
+      <label>自然日</label><input id="day" value="2026-11-20" placeholder="yyyy-MM-dd" style="width:140px" />
+      <button onclick="loadDispute()">核查争议</button>
+      <button class="ghost" onclick="fillSample('U7','2026-11-20')">样例 U7 更正链</button>
+      <button class="ghost" onclick="fillSample('U9','2026-10-15')">样例 U9 出账后补报</button>
+      <span class="muted">接口文档：<a href="/swagger-ui/index.html" target="_blank">Swagger UI</a></span>
+    </div>
+    <div id="loginMsg" class="muted" style="margin-top:8px"></div>
+  </div>
+
+  <div id="error"></div>
+  <div id="result" style="display:none">
+    <div class="card">
+      <h2>① 核算总览（临时值 / 最终值 / 结算快照）</h2>
+      <div id="kpis" class="kpi"></div>
+    </div>
+
+    <div class="card">
+      <h2>② 客服口径解释（与下方数值、账本一致，可直接答复居民）</h2>
+      <pre id="explain" class="explain"></pre>
+    </div>
+
+    <div class="card">
+      <h2>③ 抵扣反查：每个抵扣覆盖的时间片、地址与回执来源</h2>
+      <div id="credits"></div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>④ 原始停水区间 / 抢修单 / 回执来源</h2>
+        <div id="intervals" style="overflow-x:auto"></div>
+      </div>
+      <div class="card">
+        <h2>⑤ 差额账本分录</h2>
+        <div id="ledger" style="overflow-x:auto"></div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>⑥ 居民通知（临时抵扣 / 补差说明，原值永久保留）</h2>
+        <div id="notices" style="overflow-x:auto"></div>
+      </div>
+      <div class="card">
+        <h2>⑦ 账单（原始值不可变 + 差额调整）</h2>
+        <div id="bill"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+function fillSample(a,d){ $('accountNo').value=a; $('day').value=d; loadDispute(); }
+async function login(){
+  $('loginMsg').textContent = '登录中…';
+  try{
+    const r = await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({username:$('username').value,password:$('password').value})});
+    const b = await r.json();
+    if(!r.ok) throw new Error(b.message || r.status);
+    $('token').value = b.token;
+    $('loginMsg').innerHTML = '<span style="color:var(--ok)">登录成功，token 已填入。</span>';
+  }catch(e){ $('loginMsg').innerHTML = '<span style="color:var(--bad)">登录失败：'+e.message+'</span>'; }
+}
+async function api(path){
+  const r = await fetch(path,{headers:{'Authorization':'Bearer '+$('token').value,'Accept':'application/json'}});
+  const b = await r.json();
+  if(!r.ok) throw new Error((b.code||r.status)+' '+(b.message||''));
+  return b;
+}
+function showError(e){ $('error').innerHTML = '<div class="card err">请求失败：'+e.message+'<br>请确认已登录且服务已启动。</div>'; $('result').style.display='none'; }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmt(t){ return t ? t.replace('T',' ').replace(/:\d{2}\.\d+/,'').slice(0,16) : '—'; }
+function stateTag(s){
+  const map={RECOVERED:['ok','已恢复'],OPEN:['gray','未恢复'],RECOVERY_REVOKED:['warn','恢复被推翻'],VOID:['bad','已作废']};
+  const [c,t]=map[s]||['gray',s]; return '<span class="tag '+c+'">'+t+'</span>';
+}
+function delta(n){ n=Number(n||0); const cls=n>0?'delta-pos':(n<0?'delta-neg':'muted'); return '<span class="'+cls+'">'+(n>0?'+':'')+n+'</span>'; }
+
+async function loadDispute(){
+  $('error').innerHTML='';
+  try{
+    if(!$('token').value){ await login(); }
+    const a=$('accountNo').value.trim(), d=$('day').value.trim();
+    const data = await api('/api/compensation/disputes/'+encodeURIComponent(a)+'?day='+encodeURIComponent(d));
+    const v = data.caseView;
+    $('result').style.display='block';
+    renderKpis(data,v); renderExplain(v); renderCredits(v); renderIntervals(v);
+    renderLedger(v); renderNotices(v); renderBill(v);
+  }catch(e){ showError(e); }
+}
+
+function renderKpis(data,v){
+  const lvl=data.contractLevel||{};
+  const k=[
+    ['服务账户', data.account.accountNo+' · '+(lvl.name||''), ''],
+    ['并集时长', v.unionMinutes+' 分钟 ('+v.unionHours+' 小时)', '重叠已合并，节省 '+v.overlapSavedMinutes+' 分钟'],
+    ['最终抵扣', v.creditCount+' 个', 'floor('+v.unionMinutes+'/240)='+v.creditsBeforeDailyCap+(v.dailyCapApplied?'，封顶2':'')],
+    ['最终金额', v.finalAmountCny+' 元', '每个抵扣 '+(v.unitAmountCny)+' 元'],
+    ['临时值', v.provisionalCreditCount==null?'—':v.provisionalCreditCount+' 个 / '+v.provisionalAmountCny+' 元', '居民可能已收到推送'],
+    ['结算原始值', v.settledCreditCount==null?'未结算':v.settledCreditCount+' 个 / '+v.settledAmountCny+' 元', v.billed?'已出账，原值冻结':(v.settled?'已结算':'尚未结算，直接重算')],
+    ['状态', v.status, v.billNo?('账单 '+v.billNo):''],
+  ];
+  $('kpis').innerHTML = k.map(x=>'<div class="box"><div class="k">'+x[0]+'</div><div class="v" style="font-size:18px">'+esc(x[1])+'</div><div class="muted">'+esc(x[2])+'</div></div>').join('');
+}
+function renderExplain(v){ $('explain').textContent = v.csExplanation || ''; }
+function renderCredits(v){
+  if(!v.credits.length){ $('credits').innerHTML='<span class="muted">当前并集时长未满 4 小时，暂无抵扣。</span>'; return; }
+  $('credits').innerHTML = v.credits.map(c=>`
+    <div class="prov">
+      <b>抵扣 #${c.ordinal}</b> <span class="tag">${c.amountCny} 元</span><br/>
+      覆盖并集时间：<b>${fmt(c.coveredStartAt)} ~ ${fmt(c.coveredEndAt)}</b>（计 ${c.countedMinutes} 分钟）<br/>
+      贡献地址：${c.addressCodes.map(x=>'<span class="tag">'+x+'</span>').join(' ')} ｜ 区间：${c.intervalCodes.join(', ')}
+      ${c.provenance.map(p=>`<div class="prov">
+        🏠 ${p.addressCode} · 抢修单 ${esc(p.ticketCode||'—')} · 区间 ${fmt(p.startAt)} ~ ${fmt(p.effectiveRecoveryAt)}<br/>
+        开始回执：${esc(p.startReceiptType||'')} ${esc(p.startReceiptCode||'')} @ ${fmt(p.startReceiptAt)}<br/>
+        恢复回执：${esc(p.recoveryReceiptType||'')} ${esc(p.recoveryReceiptCode||'')} @ ${fmt(p.recoveryReceiptAt)}
+        ${p.recoveryCorrectedAt?('｜校时更正后 <b>'+fmt(p.recoveryCorrectedAt)+'</b>'):''}
+        ｜来源 ${esc(p.recoverySourceType||'')} ｜复压 ${esc(p.repressureStatus||'—')}
+      </div>`).join('')}
+    </div>`).join('');
+}
+function renderIntervals(v){
+  $('intervals').innerHTML = `<table><thead><tr><th>区间/抢修单</th><th>地址</th><th>起止</th><th>状态</th><th>回执来源</th></tr></thead><tbody>`+
+    v.intervals.map(i=>`<tr>
+      <td>${esc(i.intervalCode)}<br/><span class="muted">${esc(i.ticketCode||'')}${i.incidentId?(' / 事故#'+i.incidentId):''}</span></td>
+      <td>${esc(i.addressCode)}</td>
+      <td>${fmt(i.startAt)}<br/>~ ${fmt(i.endAt)}</td>
+      <td>${stateTag(i.state)}</td>
+      <td class="muted">开始：${esc(i.startReceiptCode||'—')}<br/>恢复：${esc(i.recoveryReceiptCode||'—')} <span class="tag gray">${esc(i.recoverySourceType||'')}</span>${i.recoveryCorrectedAt?('<br/>更正：'+fmt(i.recoveryCorrectedAt)):''}</td>
+    </tr>`).join('') + `</tbody></table>`;
+}
+function renderLedger(v){
+  if(!v.ledgerEntries.length){ $('ledger').innerHTML='<span class="muted">尚未结算，无账本分录（未结算抵扣直接重算）。</span>'; return; }
+  $('ledger').innerHTML = `<table><thead><tr><th>分录</th><th>类型/原因</th><th>抵扣差额</th><th>金额差额</th><th>更正后</th></tr></thead><tbody>`+
+    v.ledgerEntries.map(e=>`<tr>
+      <td>${esc(e.entryNo)}<br/><span class="muted">${e.billNo?esc(e.billNo):'未出账'}</span></td>
+      <td><span class="tag ${e.entryType==='DIFF'?'warn':'ok'}">${e.entryType}</span><br/><span class="muted">${esc(e.reasonCode)}</span></td>
+      <td>${delta(e.creditDelta)}</td>
+      <td>${delta(e.amountDeltaCny)} 元</td>
+      <td>${e.creditAfter} 个 / ${e.amountAfterCny} 元</td>
+    </tr>`).join('')+`</tbody></table>`;
+}
+function renderNotices(v){
+  if(!v.notices.length){ $('notices').innerHTML='<span class="muted">暂无推送记录。</span>'; return; }
+  $('notices').innerHTML = v.notices.slice().reverse().map(n=>`
+    <div class="prov"><b>${esc(n.title||n.kind)}</b> <span class="tag">${esc(n.kind)}</span><br/>
+    <span class="muted">${fmt(n.createdAt)} ｜ 居民看到：<b>${n.seenCreditCount}</b> 个 / <b>${n.seenAmountCny}</b> 元
+    ${n.deltaCredits?(' ｜ 变化 '+delta(n.deltaCredits)):''}</span><br/>${esc(n.content)}</div>`).join('');
+}
+function renderBill(v){
+  const b=v.bill;
+  if(!b){ $('bill').innerHTML='<span class="muted">尚未出账（可走账期批量结算路线）。</span>'; return; }
+  $('bill').innerHTML = `<p><b>${esc(b.billNo)}</b> · 账期 ${esc(b.period)} · <span class="tag ok">${esc(b.status)}</span></p>
+    <table><tr><th>原始账单（不变）</th><td>${b.originalCreditCount} 个 / ${b.originalAmountCny} 元</td></tr>
+    <tr><th>出账后差额</th><td>${delta(b.adjustmentCreditCount)} 个 / ${delta(b.adjustmentAmountCny)} 元</td></tr>
+    <tr><th>当前应付</th><td><b>${b.currentCreditCount} 个 / ${b.currentAmountCny} 元</b></td></tr></table>
+    <div class="muted" style="margin-top:8px">原始账单行：${(b.items||[]).map(i=>i.day+' = '+i.creditCount+'个/'+i.amountCny+'元').join('；')}</div>`;
+}
+</script>
+</body>
+</html>

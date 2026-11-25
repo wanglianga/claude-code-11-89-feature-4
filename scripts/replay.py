@@ -642,6 +642,451 @@ def main():
           len(incs) == 3 and all(i["status"] == "CLOSED" for i in incs),
           [(i["code"], i["status"]) for i in incs])
 
+    # ==================================================================
+    # 15. 停水服务补偿核算：种子 / U7 无状态并集试算 / 真实事故回执同步
+    # ==================================================================
+    section("15. 补偿核算基础：服务账户合同、U7 并集规则试算、真实事故回执关联")
+    _, levels = http("GET", "/api/compensation/contract-levels", token=disp)
+    level_amount = {x["code"]: x["creditAmountCny"] for x in levels}
+    check("合同等级 CL-RES=20/CL-PLUS=50/CL-BIZ=100，U7 适用 CL-PLUS 50 元",
+          level_amount.get("CL-RES") == 20 and level_amount.get("CL-PLUS") == 50
+          and level_amount.get("CL-BIZ") == 100, level_amount)
+    _, u7acc = http("GET", "/api/compensation/service-accounts/U7", token=disp, expect=200)
+    check("U7 账户存在、CL-PLUS、唯一受水地址 A07",
+          u7acc["contractLevelCode"] == "CL-PLUS" and u7acc["addressCodes"] == ["A07"], u7acc)
+    _, a08accs = http("GET", "/api/compensation/addresses/A08/service-accounts",
+                      token=disp, expect=200)
+    check("A08 反查到的服务账户恰为邻居 U8",
+          [a["accountNo"] for a in a08accs] == ["U8"], a08accs)
+
+    def iso(day, hm):
+        return f"{day}T{hm}:00+08:00"
+
+    _, calc_u7_1 = http("POST", "/api/compensation/calculate", {
+        "day": "2026-11-20", "contractLevelCode": "CL-PLUS",
+        "intervals": [
+            {"intervalCode": "X1", "startAt": iso("2026-11-20", "10:00"),
+             "endAt": iso("2026-11-20", "12:00")},
+            {"intervalCode": "X2", "startAt": iso("2026-11-20", "11:00"),
+             "endAt": iso("2026-11-20", "15:00")},
+        ]}, token=disp, expect=200)
+    check("【U7 铁律】10-12 与 11-15 并集 300 分钟 → 1 个抵扣/50 元，不按两张工单累计成 2",
+          calc_u7_1["unionMinutes"] == 300 and calc_u7_1["unionBlocks"][0]["startAt"][11:16] == "10:00"
+          and calc_u7_1["unionBlocks"][0]["endAt"][11:16] == "15:00"
+          and calc_u7_1["creditCount"] == 1 and calc_u7_1["amountCny"] == 50, calc_u7_1)
+
+    _, calc_u7_2 = http("POST", "/api/compensation/calculate", {
+        "day": "2026-11-20", "contractLevelCode": "CL-PLUS",
+        "intervals": [
+            {"intervalCode": "X1", "startAt": iso("2026-11-20", "10:00"),
+             "endAt": iso("2026-11-20", "12:00")},
+            {"intervalCode": "X2", "startAt": iso("2026-11-20", "11:00"),
+             "endAt": iso("2026-11-20", "18:00")},
+        ]}, token=disp, expect=200)
+    check("【U7 铁律】第二次复压失败、恢复更正为 18:00 → 并集 480 分钟 = 8 小时 → 2 个抵扣/100 元",
+          calc_u7_2["unionMinutes"] == 480 and calc_u7_2["creditCount"] == 2
+          and calc_u7_2["amountCny"] == 100, calc_u7_2)
+
+    # 从真实事故回执同步补偿区间（只认 ISOLATION 开始与 PASSED REPRESSURE 恢复）
+    sync = {}
+    for iid in (i2id, i3id, i1id):
+        _, sync[iid] = http("POST", f"/api/compensation/incidents/{iid}/sync",
+                            {}, token=disp, expect=200)
+    check("I2 同步出 A01-A05 共 5 条区间，并关联开始/恢复回执 id",
+          len(sync[i2id]["syncedIntervalCodes"]) == 5
+          and sync[i2id]["startReceiptId"] and sync[i2id]["recoveryReceiptId"], sync[i2id])
+    check("I3 同步 4 条、更正后的 I1 同步 5 条",
+          len(sync[i3id]["syncedIntervalCodes"]) == 4
+          and len(sync[i1id]["syncedIntervalCodes"]) == 5,
+          (sync[i3id]["syncedIntervalCodes"], sync[i1id]["syncedIntervalCodes"]))
+    http("POST", f"/api/compensation/incidents/{i2id}/sync", {}, token=disp, expect=200)
+
+    _, u2day = http("GET", "/api/compensation/days/U2/2026-11-26", token=disp, expect=200)
+    check("真实回执联动：U2 同日 I2(05:20-09:05=225m)+I1(13:20-14:20=60m) 合计并集 285m→1 抵扣，"
+          "重复 sync 幂等",
+          u2day["rawIntervalCount"] == 2 and u2day["unionMinutes"] == 285
+          and u2day["creditCount"] == 1 and u2day["amountCny"] == 20,
+          {k: u2day.get(k) for k in ("rawIntervalCount", "unionMinutes", "creditCount")})
+    i2slice = next(i for i in u2day["intervals"] if i["incidentId"] == i2id)
+    check("I2 区间恢复时间取自 PASSED REPRESSURE 回执 09:05，来源 REPRESSURE_RECEIPT（非通知/关单时刻）",
+          i2slice["endAt"].startswith("2026-11-26T09:05")
+          and i2slice["recoverySourceType"] == "REPRESSURE_RECEIPT"
+          and i2slice["recoveryReceiptId"] == sync[i2id]["recoveryReceiptId"],
+          {k: i2slice.get(k) for k in ("endAt", "recoverySourceType", "recoveryReceiptId")})
+
+    # ==================================================================
+    # 16. 顺序一：先恢复后更正（U7 完整链 + 差额/原值保留 + 争议反查）
+    # ==================================================================
+    section("16. 回放顺序①先恢复后更正（U7）：临时0→临时1→复压失败重核→更正18:00终值2→结算")
+    D1 = "2026-11-20"
+    _, d1r1 = http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U7-T1", "accountNo": "U7", "addressCode": "A07",
+        "ticketCode": "WO-U7-01",
+        "startAt": iso(D1, "10:00"), "endAt": iso(D1, "12:00"),
+        "startReceiptCode": "RCPT-U7-S1", "startReceiptType": "ISOLATION",
+        "startReceiptAt": iso(D1, "10:00"),
+        "recoveryReceiptCode": "RCPT-U7-R1", "recoveryReceiptType": "REPRESSURE",
+        "recoveryReceiptAt": iso(D1, "12:00"),
+        "recoverySourceType": "REPRESSURE_RECEIPT", "repressureStatus": "PASSED",
+        "pushProvisional": True}, token=disp, expect=200)
+    _, d7v = http("GET", f"/api/compensation/days/U7/{D1}", token=disp, expect=200)
+    check("第一张单 10-12（120 分钟）恢复后临时核算为 0 个抵扣（未满 4 小时）",
+          d7v["unionMinutes"] == 120 and d7v["creditCount"] == 0, d7v["unionMinutes"])
+
+    http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U7-T2", "accountNo": "U7", "addressCode": "A07",
+        "ticketCode": "WO-U7-02",
+        "startAt": iso(D1, "11:00"), "endAt": iso(D1, "15:00"),
+        "startReceiptCode": "RCPT-U7-S2", "startReceiptType": "ISOLATION",
+        "startReceiptAt": iso(D1, "11:00"),
+        "recoveryReceiptCode": "RCPT-U7-R2", "recoveryReceiptType": "REPRESSURE",
+        "recoveryReceiptAt": iso(D1, "15:00"),
+        "recoverySourceType": "REPRESSURE_RECEIPT", "repressureStatus": "PASSED",
+        "pushProvisional": True}, token=disp, expect=200)
+    _, d7v = http("GET", f"/api/compensation/days/U7/{D1}", token=disp, expect=200)
+    prov16 = [n for n in d7v["notices"] if n["kind"] == "PROVISIONAL"]
+    check("第二张单 11-15 恢复后：重叠合并为 10-15=300m，临时 1 个/50 元，重叠节省 60m",
+          d7v["unionMinutes"] == 300 and d7v["creditCount"] == 1
+          and d7v["finalAmountCny"] == 50 and d7v["overlapSavedMinutes"] == 60,
+          (d7v["unionMinutes"], d7v["creditCount"]))
+    check("两次恢复各推一条临时抵扣，最新一条居民所见=1（该数值后续必须原样保留）",
+          len(prov16) == 2 and prov16[-1]["seenCreditCount"] == 1
+          and prov16[-1]["seenAmountCny"] == 50, len(prov16))
+
+    st, bad_notify = http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U7-BAD-N", "accountNo": "U7", "addressCode": "A07",
+        "startAt": iso(D1, "10:00"), "endAt": iso(D1, "12:00"),
+        "recoverySourceType": "NOTIFICATION"}, token=disp)
+    check("把通知发送时间当作恢复时间 → 422 RECOVERY_SOURCE_NOT_RECEIPT",
+          st == 422 and bad_notify.get("code") == "RECOVERY_SOURCE_NOT_RECEIPT", (st, bad_notify))
+    st, bad_close = http("POST", "/api/compensation/intervals/U7-T1/recovery", {
+        "endAt": iso(D1, "12:00"),
+        "recoverySourceType": "WORK_ORDER_CLOSE"}, token=disp)
+    check("把工单关闭时间当作恢复时间 → 同样 422 拒绝",
+          st == 422 and bad_close.get("code") == "RECOVERY_SOURCE_NOT_RECEIPT", (st, bad_close))
+
+    _, fail16 = http("POST", "/api/compensation/intervals/U7-T2/repressure-failure", {
+        "failedReceiptCode": "PR-U7-FAIL", "failedAt": iso(D1, "15:10"),
+        "reason": "第二次复压 0.14MPa 低于 CL 支管下限 0.22，复压失败"},
+        token=disp, expect=200)
+    fv = fail16["dayView"]
+    check("复压失败：U7-T2 原 15:00 恢复被推翻（RECOVERY_REVOKED），未结算直接重算，"
+          "有效并集只剩 10-12=120m→0",
+          fv["unionMinutes"] == 120 and fv["creditCount"] == 0
+          and fv["recoveryRevokedCount"] == 1,
+          (fv["unionMinutes"], fv["creditCount"], fv["recoveryRevokedCount"]))
+    check("失败后发 REASSESSING 重新核定通知；原 PROVISIONAL 中居民看到的 1/50 未被改写",
+          any(n["kind"] == "REASSESSING" for n in fv["notices"])
+          and any(n["kind"] == "PROVISIONAL" and n["seenCreditCount"] == 1
+                  and n["seenAmountCny"] == 50 for n in fv["notices"]))
+
+    _, corr16 = http("POST", "/api/compensation/intervals/U7-T2/correct-recovery", {
+        "newEndAt": iso(D1, "18:00"),
+        "recoveryReceiptAt": iso(D1, "15:00"),
+        "newRecoveryCorrectedAt": iso(D1, "18:00"),
+        "correctedReceiptCode": "RCPT-U7-R2-OK-CORR",
+        "recoveryReceiptType": "REPRESSURE", "repressureStatus": "PASSED",
+        "correctionRef": "TIME-CORR-U7-1",
+        "reason": "返工后复压通过；恢复回执校时更正，实际恢复为 18:00"},
+        token=disp, expect=200)
+    cv16 = corr16["dayView"]
+    supp16 = [n for n in cv16["notices"] if n["kind"] == "SUPPLEMENT"]
+    check("校时更正到 18:00：并集 10-18=480m（8h）→ 2 个抵扣/100 元",
+          cv16["unionMinutes"] == 480 and cv16["creditCount"] == 2
+          and cv16["finalAmountCny"] == 100, (cv16["unionMinutes"], cv16["creditCount"]))
+    check("未结算阶段更正：发补差说明 1→2（delta +1 个/+50 元），但不写任何账本分录",
+          len(supp16) == 1 and supp16[0]["previousCreditCount"] == 1
+          and supp16[0]["seenCreditCount"] == 2 and supp16[0]["deltaCredits"] == 1
+          and supp16[0]["deltaAmountCny"] == 50 and cv16["ledgerEntries"] == [],
+          supp16)
+
+    _, set16 = http("POST", f"/api/compensation/days/U7/{D1}/settle",
+                    {"route": "IMMEDIATE", "note": "居民认可当日核算"}, token=disp, expect=200)
+    le16 = set16["settlementEntry"]
+    sv16 = set16["dayView"]
+    check("结算写唯一 SETTLEMENT 分录：2 个/100 元，after=2/100",
+          le16["entryType"] == "SETTLEMENT" and le16["creditAfter"] == 2
+          and le16["amountAfterCny"] == 100, le16)
+    check("账户日 SETTLED 且冻结居民结算时看到的原始值 2/100",
+          sv16["status"] == "SETTLED" and sv16["settledCreditCount"] == 2
+          and sv16["settledAmountCny"] == 100, sv16["status"])
+    _, set16b = http("POST", f"/api/compensation/days/U7/{D1}/settle", {}, token=disp, expect=200)
+    check("重复结算幂等：账本仍只有 1 条 SETTLEMENT",
+          len(set16b["dayView"]["ledgerEntries"]) == 1)
+
+    _, dispute7 = http("GET", f"/api/compensation/disputes/U7?day={D1}", token=disp, expect=200)
+    dv7 = dispute7["caseView"]
+    txt7 = dv7["csExplanation"]
+    check("争议页解释含账户/地址/并集时刻/分钟数/回执来源/账本等关键要素",
+          all(k in txt7 for k in ["U7", "A07", "10:00", "18:00", "480",
+                                 "RCPT-U7", "REPRESSURE", "差额账本"]), txt7)
+    check("抵扣反查精确：第1个覆盖10-14且来自两张单，第2个覆盖14-18且只来自 U7-T2",
+          [c["intervalCodes"] for c in dv7["credits"]] == [["U7-T1", "U7-T2"], ["U7-T2"]]
+          and dv7["credits"][0]["coveredStartAt"][11:16] == "10:00"
+          and dv7["credits"][0]["coveredEndAt"][11:16] == "14:00"
+          and dv7["credits"][1]["coveredEndAt"][11:16] == "18:00",
+          [c["intervalCodes"] for c in dv7["credits"]])
+    prov_blob = json.dumps(dv7["credits"], ensure_ascii=False)
+    check("抵扣证据 provenance 可反查开始/恢复回执编码与校时更正时刻",
+          "RCPT-U7-S1" in prov_blob and "RCPT-U7-R2-OK-CORR" in prov_blob
+          and "recoveryCorrectedAt" in prov_blob and "startReceiptCode" in prov_blob)
+    check("U7 争议不串邻居：整个 caseView 不出现 A08/U8",
+          "A08" not in json.dumps(dv7, ensure_ascii=False)
+          and "U8" not in json.dumps(dv7, ensure_ascii=False))
+    _, revs7 = http("GET", "/api/compensation/intervals/U7-T2/revisions", token=disp, expect=200)
+    actions7 = [r["action"] for r in revs7]
+    check("U7-T2 完整变更链含 UPSERT / REPRESSURE_FAILURE / CORRECT_RECOVERY",
+          {"UPSERT", "REPRESSURE_FAILURE", "CORRECT_RECOVERY"} <= set(actions7), actions7)
+
+    # ==================================================================
+    # 17. 顺序二：重叠事件先后到达（U8）+ 邻居隔离 + 移出 + 结算后差额
+    # ==================================================================
+    section("17. 回放顺序②重叠事件先后到达（U8）：不重复计 / 地址移出重算 / 结算后晚到差额")
+    D2 = "2026-11-21"
+    http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U8-B", "accountNo": "U8", "addressCode": "A08",
+        "ticketCode": "WO-U8-B",
+        "startAt": iso(D2, "11:00"), "endAt": iso(D2, "15:00"),
+        "startReceiptCode": "RCPT-U8-SB", "recoveryReceiptCode": "RCPT-U8-RB",
+        "recoverySourceType": "REPRESSURE_RECEIPT", "pushProvisional": True},
+        token=disp, expect=200)
+    _, v8 = http("GET", f"/api/compensation/days/U8/{D2}", token=disp, expect=200)
+    check("先到事件 11-15 恰好 240 分钟 → 1 个抵扣/20 元",
+          v8["unionMinutes"] == 240 and v8["creditCount"] == 1, (v8["unionMinutes"], v8["creditCount"]))
+
+    http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U8-A", "accountNo": "U8", "addressCode": "A08",
+        "ticketCode": "WO-U8-A",
+        "startAt": iso(D2, "10:00"), "endAt": iso(D2, "12:00"),
+        "startReceiptCode": "RCPT-U8-SA", "recoveryReceiptCode": "RCPT-U8-RA",
+        "recoverySourceType": "REPRESSURE_RECEIPT", "pushProvisional": True},
+        token=disp, expect=200)
+    _, v8 = http("GET", f"/api/compensation/days/U8/{D2}", token=disp, expect=200)
+    check("重叠的 10-12 事件后到：并集仍 10-15=300m，抵扣仍为 1（两张单不双计）",
+          v8["unionMinutes"] == 300 and v8["creditCount"] == 1
+          and v8["overlapSavedMinutes"] == 60, (v8["unionMinutes"], v8["overlapSavedMinutes"]))
+
+    # 同时间窗的邻居账户 U7（不同地址），必须各自独立
+    http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U7-N", "accountNo": "U7", "addressCode": "A07",
+        "ticketCode": "WO-U7-N",
+        "day": D2, "startAt": iso(D2, "10:00"), "endAt": iso(D2, "15:00"),
+        "recoveryReceiptCode": "RCPT-U7-N", "recoverySourceType": "REPRESSURE_RECEIPT",
+        "pushProvisional": False}, token=disp, expect=200)
+    _, dp8 = http("GET", f"/api/compensation/disputes/U8?day={D2}", token=disp, expect=200)
+    _, u7d2 = http("GET", f"/api/compensation/days/U7/{D2}", token=disp, expect=200)
+    check("邻居隔离：U8 争议不含 A07/U7-N；U7 同日同时段独立核算为 1，不与 U8 混算",
+          "A07" not in json.dumps(dp8["caseView"], ensure_ascii=False)
+          and "U7-N" not in json.dumps(dp8["caseView"], ensure_ascii=False)
+          and u7d2["creditCount"] == 1 and u7d2["unionMinutes"] == 300)
+
+    http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U8-C", "accountNo": "U8", "addressCode": "A08",
+        "ticketCode": "WO-U8-C",
+        "startAt": iso(D2, "16:00"), "endAt": iso(D2, "19:00"),
+        "recoveryReceiptCode": "RCPT-U8-RC", "recoverySourceType": "REPRESSURE_RECEIPT",
+        "pushProvisional": True}, token=disp, expect=200)
+    _, v8 = http("GET", f"/api/compensation/days/U8/{D2}", token=disp, expect=200)
+    check("第三段 16-19(180m) 到达：并集 300+180=480m → 2 个抵扣",
+          v8["unionMinutes"] == 480 and v8["creditCount"] == 2, v8["unionMinutes"])
+
+    _, rm17 = http("POST", "/api/compensation/intervals/U8-C/remove", {
+        "reason": "压力复核更正：WO-U8-C 对应的 A08 被移出该事故影响范围",
+        "correctionRef": "CR-U8-1"}, token=disp, expect=200)
+    rv17 = rm17["dayView"]
+    sup17 = [n for n in rv17["notices"] if n["kind"] == "SUPPLEMENT"]
+    check("地址移出影响范围：U8-C 作废，未结算直接重算回 300m/1 个，voided=1",
+          rv17["unionMinutes"] == 300 and rv17["creditCount"] == 1
+          and rv17["voidedIntervalCount"] == 1, (rv17["unionMinutes"], rv17["voidedIntervalCount"]))
+    check("移出后发 2→1 调减补差说明（delta -1/-20），仍无账本分录",
+          len(sup17) == 1 and sup17[0]["previousCreditCount"] == 2
+          and sup17[0]["seenCreditCount"] == 1 and sup17[0]["deltaCredits"] == -1
+          and sup17[0]["deltaAmountCny"] == -20 and rv17["ledgerEntries"] == [], sup17)
+
+    http("POST", f"/api/compensation/days/U8/{D2}/settle", {"route": "IMMEDIATE"},
+         token=disp, expect=200)
+    _, late17 = http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U8-D", "accountNo": "U8", "addressCode": "A08",
+        "ticketCode": "WO-U8-D",
+        "startAt": iso(D2, "14:00"), "endAt": iso(D2, "19:00"),
+        "recoveryReceiptCode": "RCPT-U8-RD", "recoverySourceType": "REPRESSURE_RECEIPT"},
+        token=disp, expect=200)
+    diffs17 = late17["evaluation"]["newLedgerEntries"]
+    check("已结算后重叠延伸事件到达：追加 1 条 DIFF +1/+20，after=2/40，原因 OVERLAP_LATE_EVENT",
+          len(diffs17) == 1 and diffs17[0]["entryType"] == "DIFF"
+          and diffs17[0]["reasonCode"] == "OVERLAP_LATE_EVENT"
+          and diffs17[0]["creditDelta"] == 1 and diffs17[0]["amountDeltaCny"] == 20
+          and diffs17[0]["creditAfter"] == 2 and diffs17[0]["amountAfterCny"] == 40, diffs17)
+    _, led8 = http("GET", f"/api/compensation/ledger?accountNo=U8&day={D2}", token=disp, expect=200)
+    check("U8 账本两条：SETTLEMENT 原始 1/20 不变；DIFF 保留 preservedSeen=1",
+          len(led8) == 2 and led8[0]["entryType"] == "SETTLEMENT"
+          and led8[0]["creditAfter"] == 1 and led8[0]["amountAfterCny"] == 20
+          and led8[1]["entryType"] == "DIFF"
+          and led8[1]["preservedSeenCreditCount"] == 1, led8)
+    _, v8 = http("GET", f"/api/compensation/days/U8/{D2}", token=disp, expect=200)
+    check("U8 结算快照仍冻结为 1/20，当前最终值为 2/40（差额更正而非覆盖）",
+          v8["settledCreditCount"] == 1 and v8["settledAmountCny"] == 20
+          and v8["finalCreditCount"] == 2 and v8["finalAmountCny"] == 40)
+
+    _, bulk17 = http("POST", "/api/compensation/scope-removals", {
+        "ticketCode": "WO-U7-N", "addressCode": "A07",
+        "correctionRef": "CR-BULK-1",
+        "reason": "按压力复核更正记录批量移出地址"}, token=disp, expect=200)
+    _, u7d2b = http("GET", f"/api/compensation/days/U7/{D2}", token=disp, expect=200)
+    check("scope-removals 按 抢修单+地址 批量作废邻居区间 1 条，U7 该日重算为 0/voided=1",
+          bulk17["voidedCount"] == 1 and u7d2b["creditCount"] == 0
+          and u7d2b["voidedIntervalCount"] == 1, bulk17)
+
+    # ==================================================================
+    # 18. 顺序三：已出账后补报（U9）——路线 B + 差额账本 + 账单调整
+    # ==================================================================
+    section("18. 回放顺序③已出账后补报（U9）：批量出账1 → 补报并集8h→2 → 差额分录与账单调整")
+    D3, P3 = "2026-10-15", "2026-10"
+    _, r9 = http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U9-1", "accountNo": "U9", "addressCode": "A09",
+        "ticketCode": "WO-U9-1", "mode": "BATCH",
+        "startAt": iso(D3, "09:00"), "endAt": iso(D3, "13:00"),
+        "startReceiptCode": "RCPT-U9-S1", "recoveryReceiptCode": "RCPT-U9-R1",
+        "recoverySourceType": "REPRESSURE_RECEIPT"}, token=disp, expect=200)
+    check("路线B：BATCH 模式登记 09-13(240m) 后不推临时通知，居民暂不可见",
+          r9["evaluation"]["newNotices"] == [], r9["evaluation"]["newNotices"])
+    _, v9 = http("GET", f"/api/compensation/days/U9/{D3}", token=disp, expect=200)
+    check("账期合并前 U9 日核算为 1/20 且无通知", v9["creditCount"] == 1 and v9["notices"] == [])
+
+    _, iss3 = http("POST", f"/api/compensation/periods/{P3}/issue", {}, token=disp, expect=200)
+    check("2026-10 账期出账，生成 BILL-202610-U9",
+          iss3["billCount"] == 1 and "BILL-202610-U9" in iss3["billNos"], iss3)
+    _, bill9 = http("GET", "/api/compensation/bills/BILL-202610-U9", token=disp, expect=200)
+    check("U9 账单原始 1 个/20 元，调整 0，当前 1/20，含 1 个账户日快照行",
+          bill9["originalCreditCount"] == 1 and bill9["originalAmountCny"] == 20
+          and bill9["currentCreditCount"] == 1 and bill9["adjustmentAmountCny"] == 0
+          and len(bill9["items"]) == 1, bill9)
+    _, v9 = http("GET", f"/api/compensation/days/U9/{D3}", token=disp, expect=200)
+    check("出账后账户日 BILLED 且挂账单号，并有 BILL_ISSUED 通知",
+          v9["status"] == "BILLED" and v9["billNo"] == "BILL-202610-U9"
+          and any(n["kind"] == "BILL_ISSUED" for n in v9["notices"]))
+    _, iss3b = http("POST", f"/api/compensation/periods/{P3}/issue", {}, token=disp, expect=200)
+    check("账期重复出账幂等：billCount 仍为 1", iss3b["billCount"] == 1, iss3b)
+
+    _, late9 = http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U9-2", "accountNo": "U9", "addressCode": "A09",
+        "ticketCode": "WO-U9-2-LATE",
+        "startAt": iso(D3, "12:00"), "endAt": iso(D3, "17:00"),
+        "startReceiptCode": "RCPT-U9-S2", "recoveryReceiptCode": "RCPT-U9-R2",
+        "recoverySourceType": "REPRESSURE_RECEIPT", "repressureStatus": "PASSED",
+        "note": "账后补报的第二张抢修单"}, token=disp, expect=200)
+    diff9 = late9["evaluation"]["newLedgerEntries"]
+    check("出账后补报：09-13 与 12-17 并集 09-17=480m→2；追加 LATE_REPORT_AFTER_BILL "
+          "DIFF +1/+20 after=2/40 且挂原账单",
+          len(diff9) == 1 and diff9[0]["reasonCode"] == "LATE_REPORT_AFTER_BILL"
+          and diff9[0]["creditDelta"] == 1 and diff9[0]["amountDeltaCny"] == 20
+          and diff9[0]["creditAfter"] == 2 and diff9[0]["amountAfterCny"] == 40
+          and diff9[0]["billNo"] == "BILL-202610-U9", diff9)
+    check("出账后补报自动生成补差说明通知",
+          any(n["kind"] == "SUPPLEMENT" and n["seenCreditCount"] == 2
+              for n in late9["evaluation"]["newNotices"]))
+    _, bill9b = http("GET", "/api/compensation/bills/BILL-202610-U9", token=disp, expect=200)
+    check("账单原始值仍冻结 1/20；差额累计 +1/+20；当前应付 2/40",
+          bill9b["originalCreditCount"] == 1 and bill9b["originalAmountCny"] == 20
+          and bill9b["adjustmentCreditCount"] == 1 and bill9b["adjustmentAmountCny"] == 20
+          and bill9b["currentCreditCount"] == 2 and bill9b["currentAmountCny"] == 40, bill9b)
+    _, led9 = http("GET", f"/api/compensation/ledger?accountNo=U9&day={D3}", token=disp, expect=200)
+    check("U9 账本恰为 SETTLEMENT + DIFF 两条",
+          [e["entryType"] for e in led9] == ["SETTLEMENT", "DIFF"],
+          [(e["entryType"], e["reasonCode"]) for e in led9])
+    http("POST", f"/api/compensation/periods/{P3}/issue", {}, token=disp, expect=200)
+    _, led9b = http("GET", f"/api/compensation/ledger?accountNo=U9&day={D3}", token=disp, expect=200)
+    check("再次重复出账不新增任何分录（仍 2 条）", len(led9b) == 2)
+    _, dp9 = http("GET", f"/api/compensation/disputes/U9?day={D3}", token=disp, expect=200)
+    txt9 = dp9["caseView"]["csExplanation"]
+    check("U9 争议解释与账本/账单一致：含原账单号、原始值保持不变、+20 差额、当前应付 40",
+          "BILL-202610-U9" in txt9 and "保持不变" in txt9 and "+20" in txt9
+          and "当前应付" in txt9 and "LATE_REPORT_AFTER_BILL" in txt9, txt9)
+
+    # ==================================================================
+    # 19. 两条路线同结果 + 反查端点 + 争议页 + OpenAPI + 角色
+    # ==================================================================
+    section("19. 即时/批量两路线同账户日规则同结果；反查端点、争议页、文档与权限")
+    D4, P4 = "2026-09-20", "2026-09"
+    # U10 路线 A：恢复即推临时值，再更正，再结算
+    http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U10-1", "accountNo": "U10", "addressCode": "A10",
+        "startAt": iso(D4, "10:00"), "endAt": iso(D4, "12:00"),
+        "recoverySourceType": "REPRESSURE_RECEIPT", "pushProvisional": True},
+        token=disp, expect=200)
+    http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U10-2", "accountNo": "U10", "addressCode": "A10",
+        "startAt": iso(D4, "11:00"), "endAt": iso(D4, "15:00"),
+        "recoverySourceType": "REPRESSURE_RECEIPT", "pushProvisional": True},
+        token=disp, expect=200)
+    http("POST", "/api/compensation/intervals/U10-2/correct-recovery", {
+        "newEndAt": iso(D4, "18:00"), "correctedReceiptCode": "RCPT-U10-CORR",
+        "reason": "校时更正为 18:00"}, token=disp, expect=200)
+    http("POST", f"/api/compensation/days/U10/{D4}/settle", {"route": "IMMEDIATE"},
+         token=disp, expect=200)
+    # U11 路线 B：只在账期结束时按最终区间合并结算
+    http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U11-1", "accountNo": "U11", "addressCode": "A11", "mode": "BATCH",
+        "startAt": iso(D4, "10:00"), "endAt": iso(D4, "12:00"),
+        "recoverySourceType": "REPRESSURE_RECEIPT"}, token=disp, expect=200)
+    http("POST", "/api/compensation/intervals", {
+        "intervalCode": "U11-2", "accountNo": "U11", "addressCode": "A11", "mode": "BATCH",
+        "startAt": iso(D4, "11:00"), "endAt": iso(D4, "18:00"),
+        "recoverySourceType": "REPRESSURE_RECEIPT"}, token=disp, expect=200)
+    _, iss4 = http("POST", f"/api/compensation/periods/{P4}/issue", {}, token=disp, expect=200)
+    check("2026-09 账期同时为 U10/U11 出账（U10 已日结算，U11 账期结算），共 2 张账单",
+          iss4["billCount"] == 2
+          and {"BILL-202609-U10", "BILL-202609-U11"} <= set(iss4["billNos"]), iss4)
+    _, d10 = http("GET", f"/api/compensation/days/U10/{D4}", token=disp, expect=200)
+    _, d11 = http("GET", f"/api/compensation/days/U11/{D4}", token=disp, expect=200)
+    check("两条路线最终完全一致：并集 480m、2 个抵扣、CL-RES 40 元、结算快照 2/40",
+          (d10["unionMinutes"], d10["creditCount"], d10["finalAmountCny"],
+           d10["settledCreditCount"], d10["settledAmountCny"]) == (480, 2, 40, 2, 40)
+          and (d11["unionMinutes"], d11["creditCount"], d11["finalAmountCny"],
+               d11["settledCreditCount"], d11["settledAmountCny"]) == (480, 2, 40, 2, 40),
+          ((d10["unionMinutes"], d10["creditCount"]), (d11["unionMinutes"], d11["creditCount"])))
+    _, n10 = http("GET", "/api/compensation/notices?accountNo=U10", token=disp, expect=200)
+    _, n11 = http("GET", "/api/compensation/notices?accountNo=U11", token=disp, expect=200)
+    check("体验差异保留：U10 有 PROVISIONAL+SUPPLEMENT 过程推送；U11 全程只有 BILL_ISSUED",
+          "PROVISIONAL" in [n["kind"] for n in n10]
+          and "SUPPLEMENT" in [n["kind"] for n in n10]
+          and [n["kind"] for n in n11] == ["BILL_ISSUED"],
+          ([n["kind"] for n in n10], [n["kind"] for n in n11]))
+
+    _, ev72 = http("GET", "/api/compensation/credits/evidence"
+                          "?accountNo=U7&day=2026-11-20&ordinal=2", token=disp, expect=200)
+    check("GET /credits/evidence 反查第2抵扣 → 仅 U7-T2 / A07 / 14:00-18:00",
+          ev72["intervalCodes"] == ["U7-T2"] and ev72["addressCodes"] == ["A07"]
+          and ev72["coveredStartAt"][11:16] == "14:00"
+          and ev72["coveredEndAt"][11:16] == "18:00", ev72)
+
+    try:
+        with urllib.request.urlopen(BASE + "/dispute.html", timeout=10) as r:
+            page_html = r.read().decode("utf-8")
+            page_status = r.status
+    except Exception as e:  # noqa
+        page_html, page_status = str(e), 0
+    check("客服争议页 /dispute.html 可访问且含争议核查内容",
+          page_status == 200 and "争议" in page_html and "compensation/disputes" in page_html,
+          page_status)
+
+    _, docs2 = http("GET", "/v3/api-docs", expect=200)
+    docs_blob = json.dumps(docs2, ensure_ascii=False)
+    check("OpenAPI 文档包含补偿区间/争议反查/账期出账路径",
+          "/api/compensation/intervals" in docs_blob
+          and "/api/compensation/disputes/{accountNo}" in docs_blob
+          and "/api/compensation/periods/{period}/issue" in docs_blob
+          and "/api/disputes/{accountNo}" in docs_blob)
+
+    st_viewer_write, _ = http("POST", "/api/compensation/intervals",
+                              {"accountNo": "U7", "startAt": iso(D1, "10:00")},
+                              token=viewer_token)
+    check("VIEWER 不能登记补偿区间（403）", st_viewer_write == 403, st_viewer_write)
+    st_anon, _ = http("GET", f"/api/compensation/disputes/U7?day={D1}")
+    check("争议数据未登录访问返回 401", st_anon == 401, st_anon)
+    st_viewer_read, _ = http("GET", f"/api/compensation/disputes/U7?day={D1}", token=viewer_token)
+    check("VIEWER 可只读查看争议页数据（200）", st_viewer_read == 200, st_viewer_read)
+
     print("\n" + "#" * 78)
     print(f"# 回放断言结果：PASS={PASS_COUNT}  FAIL={FAIL_COUNT}")
     if FAIL_COUNT:
@@ -651,6 +1096,7 @@ def main():
         print("ALL_DONE: false")
         sys.exit(1)
     print("# 🎉 全部场景断言通过：同段重拨 / 相邻双支管 / 并发互斥 / 复压重派 / 更正链")
+    print("#    补偿核算：U7 并集铁律 / 先恢复后更正 / 重叠晚到 / 出账后补报 / 差额账本 / 争议反查 / 两路线同结果")
     print("ALL_DONE: true")
     sys.exit(0)
 

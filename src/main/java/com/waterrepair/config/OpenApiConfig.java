@@ -18,7 +18,9 @@ public class OpenApiConfig {
                         .title("供水抢修调度服务 API")
                         .version("1.0.0")
                         .description("从报修受理、事故确认、候选关阀影响计算、班组资质与互斥派工，"
-                                + "到现场回执序列、复压核验与压力复核更正的闭环接口。"
+                                + "到现场回执序列、复压核验与压力复核更正的闭环接口；"
+                                + "另含停水服务补偿核算（账户日区间并集、4 小时/抵扣、每日 2 个上限、"
+                                + "临时抵扣、结算/账期账单、差额分录与客服争议反查）。"
                                 + "先调用 /api/auth/login 获取 token，再点击右上角 Authorize 输入 Bearer token。"))
                 .components(new Components().addSecuritySchemes("bearer-jwt",
                         new SecurityScheme()
